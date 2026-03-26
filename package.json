@@ -1,0 +1,10 @@
+{
+  "name": "yunanca-backend",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node api/subtitles.js"
+  },
+  "dependencies": {
+    "youtube-captions-scraper": "^2.0.1"
+  }
+}
