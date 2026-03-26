@@ -1,7 +1,7 @@
 const { YoutubeTranscript } = require('youtube-transcript');
 
 module.exports = async (req, res) => {
-  // CORS Ayarları
+  // CORS Ayarları (Uygulamanızın erişebilmesi için)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -17,15 +17,12 @@ module.exports = async (req, res) => {
     let isGreek = true;
 
     try {
-        // 1. Önce videodan zorla Yunanca altyazıyı (el) koparmaya çalışıyoruz
         transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'el' });
     } catch (e) {
-        // 2. Yunanca yoksa İngilizceyi deniyoruz
         try {
             transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
             isGreek = false;
         } catch (err) {
-            // 3. İkisi de yoksa, videonun orijinal dilinde ne varsa onu çekiyoruz
             transcript = await YoutubeTranscript.fetchTranscript(videoId);
             isGreek = false;
         }
@@ -35,18 +32,15 @@ module.exports = async (req, res) => {
         return res.status(500).json({ error: 'Bu videoda hiçbir altyazı bulunamadı.' });
     }
 
-    // Altyazıları sistemin saniye saniye oynatabileceği temiz bir JSON formatına dönüştürüyoruz
     const formattedCaptions = transcript.map(item => ({
         start: item.offset / 1000,
         end: (item.offset + item.duration) / 1000,
         text: item.text.replace(/\n/g, ' ').replace(/\[.*?\]/g, '').trim()
     }));
 
-    // Başarıyla frontend'e (Akıllı Okuyucuya) gönder
     return res.status(200).json({ isGreek: isGreek, data: formattedCaptions });
 
   } catch (error) {
-    // Mobil API bile engellenirse veya altyazı tamamen kapalıysa hata fırlat
-    return res.status(500).json({ error: 'Altyazı kapalı veya API engeli: ' + error.message });
+    return res.status(500).json({ error: 'Altyazı API engeli veya kapalı: ' + error.message });
   }
 };
