@@ -1,4 +1,4 @@
-const { getSubtitles } = require('youtube-captions-scraper');
+const { YoutubeTranscript } = require('youtube-transcript');
 
 module.exports = async (req, res) => {
   // CORS Ayarları
@@ -13,96 +13,40 @@ module.exports = async (req, res) => {
   if (!videoId) return res.status(400).json({ error: 'Video ID gerekli.' });
 
   try {
+    let transcript = [];
     let isGreek = true;
-    let formattedCaptions = [];
 
-    // YÖNTEM 1: Hazır Kütüphane İle (youtube-captions-scraper)
     try {
-        let captions = [];
+        // 1. Önce videodan zorla Yunanca altyazıyı (el) koparmaya çalışıyoruz
+        transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'el' });
+    } catch (e) {
+        // 2. Yunanca yoksa İngilizceyi deniyoruz
         try {
-            captions = await getSubtitles({ videoID: videoId, lang: 'el' });
-        } catch(e) {
-            captions = await getSubtitles({ videoID: videoId, lang: 'en' });
+            transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
+            isGreek = false;
+        } catch (err) {
+            // 3. İkisi de yoksa, videonun orijinal dilinde ne varsa onu çekiyoruz
+            transcript = await YoutubeTranscript.fetchTranscript(videoId);
             isGreek = false;
         }
-        
-        formattedCaptions = captions.map(cap => ({
-            start: parseFloat(cap.start),
-            end: parseFloat(cap.start) + parseFloat(cap.dur),
-            text: cap.text.replace(/\n/g, ' ').replace(/\[.*?\]/g, '').trim()
-        }));
-
-    } catch (libError) {
-        // YÖNTEM 2: Kütüphane YouTube tarafından engellenirse Manuel Deep Scrape (Derin Kazıma) yap
-        const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-            headers: {
-                'Accept-Language': 'en-US,en;q=0.9',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-                // Daha güçlü ve yeni çerez onay kodu (SOCS=CAI eklendi)
-                'Cookie': 'CONSENT=YES+cb.20210328-17-p0.en+FX+478; SOCS=CAI;' 
-            }
-        });
-        const html = await response.text();
-        
-        let captionTracks = null;
-        
-        // Önce normal şekilde ara
-        const regex1 = /"captionTracks":\s*(\[.*?\])/;
-        const match1 = regex1.exec(html);
-        if (match1) {
-            try { captionTracks = JSON.parse(match1[1]); } catch(e){}
-        }
-
-        // Bulamazsa gizli veri paketinin (ytInitialPlayerResponse) içine dal
-        if (!captionTracks) {
-            const regex2 = /ytInitialPlayerResponse\s*=\s*({.+?})\s*;\s*(?:var\s+meta|<\/script|\n)/;
-            const match2 = regex2.exec(html);
-            if (match2) {
-                try {
-                    const data = JSON.parse(match2[1]);
-                    captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-                } catch(e) {}
-            }
-        }
-
-        if (!captionTracks || captionTracks.length === 0) {
-            return res.status(500).json({ error: 'Bu videoda (CC) altyazı kapalı veya Vercel IP engeline takıldı.' });
-        }
-
-        // Öncelik Sırası: Yunanca -> İngilizce -> İlk bulduğu
-        let targetTrack = captionTracks.find(t => t.languageCode.startsWith('el')) 
-                       || captionTracks.find(t => t.languageCode.startsWith('en')) 
-                       || captionTracks[0];
-
-        isGreek = targetTrack.languageCode.startsWith('el');
-
-        const subRes = await fetch(targetTrack.baseUrl + '&fmt=json3');
-        const subData = await subRes.json();
-
-        if (subData.events) {
-            for (const event of subData.events) {
-                if (event.segs && event.segs.length > 0) {
-                    const text = event.segs.map(s => s.utf8).join('').replace(/\n/g, ' ').trim();
-                    if (text && text !== '\n') {
-                        formattedCaptions.push({
-                            start: event.tStartMs / 1000,
-                            end: (event.tStartMs + (event.dDurationMs || 0)) / 1000,
-                            text: text
-                        });
-                    }
-                }
-            }
-        }
     }
 
-    if (formattedCaptions.length === 0) {
-        return res.status(500).json({ error: 'Altyazı metinleri boş veya çıkarılamadı.' });
+    if (!transcript || transcript.length === 0) {
+        return res.status(500).json({ error: 'Bu videoda hiçbir altyazı bulunamadı.' });
     }
 
-    // Her şey başarılı, veriyi Akıllı Okuyucuya gönder!
+    // Altyazıları sistemin saniye saniye oynatabileceği temiz bir JSON formatına dönüştürüyoruz
+    const formattedCaptions = transcript.map(item => ({
+        start: item.offset / 1000,
+        end: (item.offset + item.duration) / 1000,
+        text: item.text.replace(/\n/g, ' ').replace(/\[.*?\]/g, '').trim()
+    }));
+
+    // Başarıyla frontend'e (Akıllı Okuyucuya) gönder
     return res.status(200).json({ isGreek: isGreek, data: formattedCaptions });
 
   } catch (error) {
-    return res.status(500).json({ error: 'Sunucu hatası veya Altyazı Yok.' });
+    // Mobil API bile engellenirse veya altyazı tamamen kapalıysa hata fırlat
+    return res.status(500).json({ error: 'Altyazı kapalı veya API engeli: ' + error.message });
   }
 };
