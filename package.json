@@ -5,6 +5,6 @@
     "start": "node api/subtitles.js"
   },
   "dependencies": {
-    "youtube-captions-scraper": "^2.0.1"
+    "youtube-transcript": "^1.2.1"
   }
 }
