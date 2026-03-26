@@ -1,11 +1,12 @@
 const { getSubtitles } = require('youtube-captions-scraper');
 
-export default async function handler(req, res) {
-  // Tarayıcınızın (Uygulamanızın) bu sunucuya bağlanmasına izin veren ayarlar
+module.exports = async (req, res) => {
+  // CORS Ayarları (Tarayıcının engellememesi için)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+  // Tarayıcının önden gönderdiği güvenlik (Preflight) isteğine onay ver
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -42,4 +43,4 @@ export default async function handler(req, res) {
   } catch (error) {
     return res.status(500).json({ error: 'YouTube videoyu engelledi veya hiçbir altyazı yok.' });
   }
-}
+};
