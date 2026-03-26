@@ -1,13 +1,12 @@
 module.exports = async (req, res) => {
-  // CORS Ayarları (Uygulamanızın bağlanabilmesi için)
+  // 1. Uygulamanızın bağlanabilmesi için CORS ayarları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Tarayıcı güvenlik onaylarını geç
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // Hem Akıllı Okuyucu (POST) hem de Tarayıcı Testi (GET) için Video ID al
+  // 2. Hem uygulamanızdan (POST) hem de tarayıcıdan (GET) ID alabilme özelliği
   const videoId = req.method === 'POST' ? req.body?.videoId : req.query?.videoId;
 
   if (!videoId) {
@@ -15,65 +14,89 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // 1. YouTube'un GİZLİ ANDROID MOBİL API'sine istek atıyoruz (Asla engellenemez)
-    const ytRes = await fetch('https://www.youtube.com/youtubei/v1/player', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        context: {
-          client: {
-            clientName: 'ANDROID', // Sunucuyu Android Telefon gibi gösteriyoruz
-            clientVersion: '17.31.35',
-            androidSdkVersion: 30,
-            hl: 'en',
-            gl: 'US'
-          }
-        },
-        videoId: videoId
-      })
-    });
+    // 3. YouTube'un iç API'sine 4 farklı cihaz kılığında gizlice girmeyi deniyoruz
+    const clients = [
+      { name: 'WEB', version: '2.20240228.06.00' },
+      { name: 'WEB_EMBEDDED_PLAYER', version: '1.20240228.06.00' }, // En güveniliri
+      { name: 'IOS', version: '19.29.1' },
+      { name: 'ANDROID', version: '17.31.35' }
+    ];
 
-    const data = await ytRes.json();
-    
-    // Altyazıların olduğu paketi çıkar
-    const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    let tracks = null;
 
-    if (!tracks || tracks.length === 0) {
-       return res.status(500).json({ error: 'Bu videoda (CC) altyazı kapalı veya bulunamadı.' });
+    for (const client of clients) {
+      try {
+        const ytRes = await fetch('https://www.youtube.com/youtubei/v1/player', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            context: {
+              client: { clientName: client.name, clientVersion: client.version, hl: 'en', gl: 'US' }
+            },
+            videoId: videoId
+          })
+        });
+        
+        const data = await ytRes.json();
+        const foundTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        if (foundTracks && foundTracks.length > 0) {
+          tracks = foundTracks;
+          break; // Altyazıyı bulduğumuz an döngüden çık
+        }
+      } catch (e) { continue; }
     }
 
-    // Öncelik Sırası: Yunanca -> İngilizce -> İlk Bulunan
+    if (!tracks || tracks.length === 0) {
+      return res.status(500).json({ error: 'Altyazı bulunamadı. Video altyazısız olabilir.' });
+    }
+
+    // 4. Yunanca, yoksa İngilizce, yoksa ilk çıkanı seç
     let targetTrack = tracks.find(t => t.languageCode.startsWith('el')) ||
                       tracks.find(t => t.languageCode.startsWith('en')) ||
                       tracks[0];
 
-    // 2. Altyazı metnini indir (Mobil API bunu okuması çok kolay olan JSON3 formatında verir)
-    const subRes = await fetch(targetTrack.baseUrl + '&fmt=json3');
-    const subData = await subRes.json();
+    // 5. Altyazı metnini (JSON3) indir
+    const fetchUrl = targetTrack.baseUrl + '&fmt=json3';
+    let subData = null;
 
-    const parsed = [];
-    if (subData.events) {
-        for (const event of subData.events) {
-            if (event.segs && event.segs.length > 0) {
-                // Kelimeleri birleştir, renk/html kodlarını temizle
-                const text = event.segs.map(s => s.utf8).join('').replace(/\n/g, ' ').trim();
-                if (text && text !== '\n') {
-                    parsed.push({
-                        start: event.tStartMs / 1000,
-                        end: (event.tStartMs + (event.dDurationMs || 0)) / 1000,
-                        text: text
-                    });
-                }
-            }
-        }
+    try {
+      // Önce Vercel üzerinden doğrudan indirmeyi dene
+      const subRes = await fetch(fetchUrl);
+      if (!subRes.ok) throw new Error("Vercel IP Blocked");
+      subData = await subRes.json();
+    } catch (e) {
+      // Eğer YouTube Vercel'i engellerse, proxy üzerinden sız
+      const proxyRes = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(fetchUrl)}`);
+      if (proxyRes.ok) {
+        subData = await proxyRes.json();
+      }
     }
 
-    if (parsed.length === 0) throw new Error("Ayrıştırılmış altyazı boş.");
+    if (!subData || !subData.events) {
+       return res.status(500).json({ error: 'Altyazı metni okunamadı.' });
+    }
 
-    // Tüm işlemler başarılıysa altyazıyı frontend'e gönder!
+    // 6. YouTube'un formatını bizim okuyucunun formatına dönüştür
+    const parsed = [];
+    for (const event of subData.events) {
+      if (event.segs && event.segs.length > 0) {
+        const text = event.segs.map(s => s.utf8).join('').replace(/\n/g, ' ').trim();
+        if (text && text !== '\n') {
+          parsed.push({
+            start: event.tStartMs / 1000,
+            end: (event.tStartMs + (event.dDurationMs || 0)) / 1000,
+            text: text
+          });
+        }
+      }
+    }
+
+    if (parsed.length === 0) throw new Error("Altyazı verisi boş.");
+
+    // Tüm işlemler başarılıysa altyazıyı gönder!
     return res.status(200).json({ isGreek: targetTrack.languageCode.startsWith('el'), data: parsed });
 
   } catch (error) {
-    return res.status(500).json({ error: 'Hata oluştu: ' + error.message });
+    return res.status(500).json({ error: 'Sistem Hatası: ' + error.message });
   }
 };
