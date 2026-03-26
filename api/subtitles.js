@@ -1,5 +1,4 @@
 module.exports = async (req, res) => {
-  // CORS Ayarları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -9,77 +8,43 @@ module.exports = async (req, res) => {
   const videoId = req.method === 'POST' ? req.body?.videoId : req.query?.videoId;
   if (!videoId) return res.status(400).json({ error: 'Lütfen bir video ID gönderin.' });
 
-  // Vercel IP'sini gizlemek ve Çerez (Consent) engelini aşmak için Proxy Zinciri fonksiyonu
-  async function fetchHtmlBypass(url) {
-      const proxies = [
-          `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
-          `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
-      ];
-      for (const proxy of proxies) {
-          try {
-              const r = await fetch(proxy);
-              if (r.ok) {
-                  const html = await r.text();
-                  // Eğer proxy çerez onayına (consent) düşmediyse bu html'i kullan
-                  if (!html.includes('consent.youtube.com')) return html;
-              }
-          } catch(e) { continue; }
-      }
-      // Son çare: Doğrudan Vercel üzerinden özel çerez (SOCS=CAI) basarak geçmeyi dene
-      const direct = await fetch(url, {
-          headers: { 'Cookie': 'CONSENT=YES+cb.20210328-17-p0.en+FX+478; SOCS=CAI;' }
-      });
-      return await direct.text();
-  }
-
   try {
-    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const html = await fetchHtmlBypass(ytUrl);
+    // 1. ZİRVE TAKTİĞİ: Vercel sunucusunu "Google Arama Motoru Botu" (Googlebot) olarak gösteriyoruz.
+    // YouTube, arama sonuçlarında çıkmak zorunda olduğu için Googlebot'u ASLA engellemez!
+    const ytRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    });
 
-    let captionTracks = null;
+    const html = await ytRes.text();
 
-    // Taktik 1: Sitedeki doğrudan altyazı paketini bul
-    const match1 = html.match(/"captionTracks":\s*(\[.*?\])/);
-    if (match1) {
-        try { captionTracks = JSON.parse(match1[1]); } catch(e){}
+    // 2. Altyazı paketini bul
+    const regex = /"captionTracks":\s*(\[.*?\])/;
+    const match = regex.exec(html);
+
+    if (!match) {
+        // Googlebot kılığında bile yoksa, video cidden altyazısızdır veya çok sıkı korunuyordur.
+        return res.status(500).json({ error: 'Altyazı bulunamadı. Lütfen videoda CC açık olduğundan emin olun.' });
     }
 
-    // Taktik 2: Bulamazsa ilk yükleme nesnesinin (ytInitialPlayerResponse) içine dal
-    if (!captionTracks) {
-        const match2 = html.match(/ytInitialPlayerResponse\s*=\s*({.+?})\s*;/);
-        if (match2) {
-            try { 
-                const data = JSON.parse(match2[1]); 
-                captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-            } catch(e){}
-        }
-    }
-
-    if (!captionTracks || captionTracks.length === 0) {
-        return res.status(500).json({ error: 'Altyazı bulunamadı. Video altyazısız veya erişim engellendi.' });
-    }
+    const captionTracks = JSON.parse(match[1]);
 
     // Öncelik Sırası: Yunanca -> İngilizce -> İlk Çıkan
     let targetTrack = captionTracks.find(t => t.languageCode.startsWith('el')) ||
                       captionTracks.find(t => t.languageCode.startsWith('en')) ||
                       captionTracks[0];
 
-    // Altyazı veri linkini çek (JSON3 formatında)
+    // 3. Altyazıyı indir (Yine Googlebot maskesiyle)
     const subUrl = targetTrack.baseUrl + '&fmt=json3';
+    const subRes = await fetch(subUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' }
+    });
     
-    let subData = null;
-    try {
-        // Önce doğrudan çekmeyi dene
-        const subRes = await fetch(subUrl); 
-        if (!subRes.ok) throw new Error("Doğrudan indirme engellendi");
-        subData = await subRes.json();
-    } catch(e) {
-        // Doğrudan çekemezse proxy üzerinden çek
-        const proxySub = await fetch(`https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(subUrl)}`);
-        subData = await proxySub.json();
-    }
+    if (!subRes.ok) throw new Error("Altyazı indirme isteği reddedildi.");
+    const subData = await subRes.json();
 
-    // YouTube'un karmaşık formatını saniye saniye temizle
     const parsed = [];
     if (subData && subData.events) {
         for (const event of subData.events) {
@@ -96,9 +61,9 @@ module.exports = async (req, res) => {
         }
     }
 
-    if (parsed.length === 0) throw new Error("Ayrıştırılmış metin boş çıktı.");
+    if (parsed.length === 0) throw new Error("Ayrıştırılmış metin boş.");
 
-    // Tüm engeller aşıldı! Veriyi gönder.
+    // Veriyi gönder
     return res.status(200).json({ isGreek: targetTrack.languageCode.startsWith('el'), data: parsed });
 
   } catch (error) {
